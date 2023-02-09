@@ -9,14 +9,18 @@ from onnx.utils import Extractor
 import torch
 import tqdm
 
+from ultralytics import YOLO
+
 import furiosa.quantizer.frontend.onnx
 import furiosa.quantizer_experimental  # type: ignore[import]
 from furiosa.quantizer_experimental import CalibrationMethod, Calibrator, Graph
 import furiosa.runtime.session
-from ultralytics import YOLO
 
-NUM_TESTING = 50
-MILLI_SEC = 1000
+
+NUM_TESTING = 5000
+MILLI_SEC = 1e-6
+SEC = 1e-9
+
 
 def main(argv: Optional[List[str]] = None) -> int:
     # pylint: disable=too-many-locals
@@ -53,15 +57,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     rng = np.random.default_rng()
     elapsed_times = []
     with furiosa.runtime.session.create(bytes(graph)) as session:
+        pseudo_image = rng.standard_normal(size=(1, 3, 640, 640), dtype=np.float32)
+        # warmup
+        for _ in range(10):
+            session.run(pseudo_image)
+
         for _ in tqdm.tqdm(range(NUM_TESTING), desc="Testing", unit="image", mininterval=0.5):
-            pseudo_image = rng.standard_normal(size=(1, 3, 640, 640), dtype=np.float32)
-            start = time.time()
-            session.run(pseudo_image).numpy()
-            elapsed_times.append(time.time() - start)
+            start = time.perf_counter_ns()
+            session.run(pseudo_image)
+            elapsed_times.append(time.perf_counter_ns() - start)
+
     print(f"min latency: {min(elapsed_times) * MILLI_SEC: .6f} ms")
+    percentiles = [50.0, 90.0, 95.0, 99.0, 99.9]
+    buckets = np.percentile(elapsed_times, percentiles)
+    for p, b in zip(percentiles, buckets):
+        print(f"{p} percentile: {b * MILLI_SEC: .6f}")
     print(f"max latency: {max(elapsed_times) * MILLI_SEC: .6f} ms")
     print(f"avg latency: {sum(elapsed_times) / NUM_TESTING * MILLI_SEC: .6f} ms")
-    print(f"qps(queries per second): {NUM_TESTING / sum(elapsed_times): .6f} images/s")
+    print(f"qps(queries per second): {NUM_TESTING / (sum(elapsed_times) * SEC): .6f} images/s")
 
 
 def build_argument_parser() -> ArgumentParser:
